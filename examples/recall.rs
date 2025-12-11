@@ -27,9 +27,9 @@ impl Metric<&[f32]> for Euclidean {
     }
 }
 
-impl Metric<[f32; 64]> for Euclidean {
+impl<const N: usize> Metric<[f32; N]> for Euclidean {
     type Unit = u32;
-    fn distance(&self, a: &[f32; 64], b: &[f32; 64]) -> u32 {
+    fn distance(&self, a: &[f32; N], b: &[f32; N]) -> u32 {
         a.iter()
             .zip(b.iter())
             .map(|(&a, &b)| (a - b).powi(2))
@@ -39,14 +39,14 @@ impl Metric<[f32; 64]> for Euclidean {
     }
 }
 
-/// A mmap-based feature store for [f32; 64] arrays.
-struct MmapFeatureStore {
+/// A mmap-based feature store for [f32; N] arrays.
+struct MmapFeatureStore<const N: usize> {
     mmap: MmapMut,
     len: usize,
     capacity: usize,
 }
 
-impl MmapFeatureStore {
+impl<const N: usize> MmapFeatureStore<N> {
     fn new(path: &str, capacity: usize) -> std::io::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
@@ -55,7 +55,7 @@ impl MmapFeatureStore {
             .truncate(true)
             .open(path)?;
 
-        let total_size = capacity * std::mem::size_of::<[f32; 64]>();
+        let total_size = capacity * std::mem::size_of::<[f32; N]>();
         file.set_len(total_size as u64)?;
 
         let mmap = unsafe { MmapMut::map_mut(&file)? };
@@ -68,17 +68,17 @@ impl MmapFeatureStore {
     }
 }
 
-impl FeatureStore<[f32; 64]> for MmapFeatureStore {
-    fn get(&self, index: usize) -> &[f32; 64] {
-        let offset = index * std::mem::size_of::<[f32; 64]>();
-        unsafe { &*(self.mmap[offset..].as_ptr() as *const [f32; 64]) }
+impl<const N: usize> FeatureStore<[f32; N]> for MmapFeatureStore<N> {
+    fn get(&self, index: usize) -> &[f32; N] {
+        let offset = index * std::mem::size_of::<[f32; N]>();
+        unsafe { &*(self.mmap[offset..].as_ptr() as *const [f32; N]) }
     }
 
-    fn push(&mut self, feature: [f32; 64]) {
+    fn push(&mut self, feature: [f32; N]) {
         assert!(self.len < self.capacity, "MmapFeatureStore capacity exceeded");
-        let offset = self.len * std::mem::size_of::<[f32; 64]>();
+        let offset = self.len * std::mem::size_of::<[f32; N]>();
         let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(feature.as_ptr() as *const u8, std::mem::size_of::<[f32; 64]>())
+            std::slice::from_raw_parts(feature.as_ptr() as *const u8, std::mem::size_of::<[f32; N]>())
         };
         self.mmap[offset..offset + bytes.len()].copy_from_slice(bytes);
         self.len += 1;
@@ -304,7 +304,8 @@ fn process<const M: usize, const M0: usize>(opt: &Opt) -> (Vec<f64>, Vec<f64>) {
     (recalls, times)
 }
 
-fn process_disk<S: FeatureStore<[f32; 64]>, const M: usize, const M0: usize>(
+
+fn process_disk<S: FeatureStore<[f32; N]>, const M: usize, const M0: usize, const N: usize>(
     opt: &Opt,
     storage: S,
 ) -> (Vec<f64>, Vec<f64>) {
@@ -312,20 +313,19 @@ fn process_disk<S: FeatureStore<[f32; 64]>, const M: usize, const M0: usize>(
         opt.k <= opt.size,
         "You must choose a dataset size larger or equal to the test search size"
     );
-    assert!(opt.dimensions == 64, "Disk mode only supports 64 dimensions");
     assert!(opt.file.is_none(), "Disk mode does not support file input");
 
     let rng = Pcg64::from_seed([5; 32]);
 
     eprintln!("Generating {} random bitstrings...", opt.size);
-    let search_space: Vec<[f32; 64]> = rng
+    let search_space: Vec<[f32; N]> = rng
         .clone()
         .sample_iter(&Standard)
-        .take(opt.size * 64)
+        .take(opt.size * N)
         .collect::<Vec<f32>>()
-        .chunks_exact(64)
+        .chunks_exact(N)
         .map(|chunk| {
-            let mut arr = [0.0f32; 64];
+            let mut arr = [0.0f32; N];
             arr.copy_from_slice(chunk);
             arr
         })
@@ -339,13 +339,13 @@ fn process_disk<S: FeatureStore<[f32; 64]>, const M: usize, const M0: usize>(
         "Generating {} independent random query strings...",
         opt.num_queries
     );
-    let query_strings: Vec<[f32; 64]> = rng
+    let query_strings: Vec<[f32; N]> = rng
         .sample_iter(&Standard)
-        .take(opt.num_queries * 64)
+        .take(opt.num_queries * N)
         .collect::<Vec<f32>>()
-        .chunks_exact(64)
+        .chunks_exact(N)
         .map(|chunk| {
-            let mut arr = [0.0f32; 64];
+            let mut arr = [0.0f32; N];
             arr.copy_from_slice(chunk);
             arr
         })
@@ -375,7 +375,7 @@ fn process_disk<S: FeatureStore<[f32; 64]>, const M: usize, const M0: usize>(
 
     eprintln!("Generating HNSW...");
     let prng = Pcg64::new(0xcafef00dd15ea5e5, 0xa02bdbf7bb3c0a7ac28fa16a64abf96);
-    let mut hnsw: Hnsw<Euclidean, [f32; 64], Pcg64, M, M0, S> = Hnsw::new_with_storage_and_params(
+    let mut hnsw: Hnsw<Euclidean, [f32; N], Pcg64, M, M0, S> = Hnsw::new_with_storage_and_params(
         Euclidean,
         storage,
         Params::new().ef_construction(opt.ef_construction),
@@ -431,24 +431,48 @@ fn process_disk<S: FeatureStore<[f32; 64]>, const M: usize, const M0: usize>(
     (recalls, times)
 }
 
+macro_rules! process_disk_m {
+    ( $opt:expr, $m:expr, $m0:expr ) => {
+        match $opt.dimensions {
+            64 => process_disk::<_, $m, $m0, 64>(
+                &$opt,
+                MmapFeatureStore::<64>::new("/tmp/recall_mmap.bin", $opt.size).unwrap(),
+            ),
+            128 => process_disk::<_, $m, $m0, 128>(
+                &$opt,
+                MmapFeatureStore::<128>::new("/tmp/recall_mmap.bin", $opt.size).unwrap(),
+            ),
+            256 => process_disk::<_, $m, $m0, 256>(
+                &$opt,
+                MmapFeatureStore::<256>::new("/tmp/recall_mmap.bin", $opt.size).unwrap(),
+            ),
+            512 => process_disk::<_, $m, $m0, 512>(
+                &$opt,
+                MmapFeatureStore::<512>::new("/tmp/recall_mmap.bin", $opt.size).unwrap(),
+            ),
+            _ => panic!("error: incorrect dimensions for disk mode, supported: 64, 128, 256, 512"),
+        }
+    };
+}
+
 fn main() {
     let opt = Opt::from_args();
 
     let (recalls, times, storage_type) = if opt.disk {
         let (r, t) = match opt.m {
-            4 => process_disk::<_, 4, 8>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            8 => process_disk::<_, 8, 16>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            12 => process_disk::<_, 12, 24>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            16 => process_disk::<_, 16, 32>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            20 => process_disk::<_, 20, 40>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            24 => process_disk::<_, 24, 48>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            28 => process_disk::<_, 28, 56>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            32 => process_disk::<_, 32, 64>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            36 => process_disk::<_, 36, 72>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            40 => process_disk::<_, 40, 80>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            44 => process_disk::<_, 44, 88>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            48 => process_disk::<_, 48, 96>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            52 => process_disk::<_, 52, 104>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            4 => process_disk_m!(opt, 4, 8),
+            8 => process_disk_m!(opt, 8, 16),
+            12 => process_disk_m!(opt, 12, 24),
+            16 => process_disk_m!(opt, 16, 32),
+            20 => process_disk_m!(opt, 20, 40),
+            24 => process_disk_m!(opt, 24, 48),
+            28 => process_disk_m!(opt, 28, 56),
+            32 => process_disk_m!(opt, 32, 64),
+            36 => process_disk_m!(opt, 36, 72),
+            40 => process_disk_m!(opt, 40, 80),
+            44 => process_disk_m!(opt, 44, 88),
+            48 => process_disk_m!(opt, 48, 96),
+            52 => process_disk_m!(opt, 52, 104),
             _ => {
                 eprintln!("Only M between 4 and 52 inclusive and multiples of 4 are allowed");
                 return;
