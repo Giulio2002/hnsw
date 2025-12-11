@@ -305,7 +305,7 @@ fn process<const M: usize, const M0: usize>(opt: &Opt) -> (Vec<f64>, Vec<f64>) {
     (recalls, times)
 }
 
-fn process_mmap<S: FeatureStore<[f32; 64]>, const M: usize, const M0: usize>(
+fn process_disk<S: FeatureStore<[f32; 64]>, const M: usize, const M0: usize>(
     opt: &Opt,
     storage: S,
 ) -> (Vec<f64>, Vec<f64>) {
@@ -313,12 +313,12 @@ fn process_mmap<S: FeatureStore<[f32; 64]>, const M: usize, const M0: usize>(
         opt.k <= opt.size,
         "You must choose a dataset size larger or equal to the test search size"
     );
-    assert!(opt.dimensions == 64, "Mmap mode only supports 64 dimensions");
-    assert!(opt.file.is_none(), "Mmap mode does not support file input");
+    assert!(opt.dimensions == 64, "Disk mode only supports 64 dimensions");
+    assert!(opt.file.is_none(), "Disk mode does not support file input");
 
     let rng = Pcg64::from_seed([5; 32]);
 
-    eprintln!("Generating {} random vectors...", opt.size);
+    eprintln!("Generating {} random bitstrings...", opt.size);
     let search_space: Vec<[f32; 64]> = rng
         .clone()
         .sample_iter(&Standard)
@@ -437,19 +437,19 @@ fn main() {
 
     let (recalls, times, storage_type) = if opt.disk {
         let (r, t) = match opt.m {
-            4 => process_mmap::<_, 4, 8>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            8 => process_mmap::<_, 8, 16>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            12 => process_mmap::<_, 12, 24>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            16 => process_mmap::<_, 16, 32>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            20 => process_mmap::<_, 20, 40>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            24 => process_mmap::<_, 24, 48>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            28 => process_mmap::<_, 28, 56>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            32 => process_mmap::<_, 32, 64>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            36 => process_mmap::<_, 36, 72>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            40 => process_mmap::<_, 40, 80>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            44 => process_mmap::<_, 44, 88>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            48 => process_mmap::<_, 48, 96>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
-            52 => process_mmap::<_, 52, 104>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            4 => process_disk::<_, 4, 8>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            8 => process_disk::<_, 8, 16>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            12 => process_disk::<_, 12, 24>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            16 => process_disk::<_, 16, 32>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            20 => process_disk::<_, 20, 40>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            24 => process_disk::<_, 24, 48>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            28 => process_disk::<_, 28, 56>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            32 => process_disk::<_, 32, 64>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            36 => process_disk::<_, 36, 72>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            40 => process_disk::<_, 40, 80>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            44 => process_disk::<_, 44, 88>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            48 => process_disk::<_, 48, 96>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            52 => process_disk::<_, 52, 104>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
             _ => {
                 eprintln!("Only M between 4 and 52 inclusive and multiples of 4 are allowed");
                 return;
