@@ -148,7 +148,6 @@ struct Opt {
     #[structopt(short = "c", long = "ef_construction", default_value = "400")]
     ef_construction: usize,
     /// Use mmap-based feature storage instead of in-memory Vec<T>.
-    /// Note: Only supports 64 dimensions and does not support file input.
     #[structopt(long = "disk")]
     disk: bool,
 }
