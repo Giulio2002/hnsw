@@ -6,8 +6,21 @@ use std::convert::TryInto;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::time::Instant;
 use structopt::StructOpt;
+
+struct Euclidean;
+
+impl Metric<[f32; 128]> for Euclidean {
+    type Unit = u32;
+    fn distance(&self, a: &[f32; 128], b: &[f32; 128]) -> u32 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(&a, &b)| (a - b).powi(2))
+            .sum::<f32>()
+            .sqrt()
+            .to_bits()
+    }
+}
 
 const FEATURE_SIZE: usize = 128;
 const FEATURE_BYTES: usize = FEATURE_SIZE * std::mem::size_of::<f32>();
