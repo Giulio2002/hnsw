@@ -14,12 +14,20 @@ use std::io::Read;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
-/// A mmap-based feature store for BitArray types.
+
 struct MmapBitArrayStore<T> {
     mmap: MmapMut,
     len: usize,
     capacity: usize,
+    stride: usize,
     _marker: std::marker::PhantomData<T>,
+}
+
+const ALIGNMENT: usize = 64;
+
+// this is very suboptimal but works for testing purposes
+fn align_up(size: usize, align: usize) -> usize {
+    (size + align - 1) & !(align - 1)
 }
 
 impl<T> MmapBitArrayStore<T> {
@@ -31,7 +39,10 @@ impl<T> MmapBitArrayStore<T> {
             .truncate(true)
             .open(path)?;
 
-        let total_size = capacity * item_size;
+        // Align each item to 64 bytes for SIMD
+        let stride = align_up(item_size, ALIGNMENT);
+        // Add padding at start to ensure first item is aligned
+        let total_size = ALIGNMENT + capacity * stride;
         file.set_len(total_size as u64)?;
 
         let mmap = unsafe { MmapMut::map_mut(&file)? };
@@ -40,21 +51,30 @@ impl<T> MmapBitArrayStore<T> {
             mmap,
             len: 0,
             capacity,
+            stride,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    fn aligned_offset(&self, index: usize) -> usize {
+        // Find offset that gives 64-byte alignment
+        let base = self.mmap.as_ptr() as usize;
+        let aligned_base = align_up(base, ALIGNMENT);
+        let padding = aligned_base - base;
+        padding + index * self.stride
     }
 }
 
 impl<const N: usize> FeatureStore<BitArray<N>> for MmapBitArrayStore<BitArray<N>> {
     fn get(&self, index: usize) -> &BitArray<N> {
-        let offset = index * N;
-        // Safety: BitArray<N> is repr(transparent) over [u8; N]
+        let offset = self.aligned_offset(index);
         unsafe { &*(self.mmap[offset..].as_ptr() as *const BitArray<N>) }
     }
 
     fn push(&mut self, feature: BitArray<N>) {
+        // we dont need to be sophisticated for this dummy example
         assert!(self.len < self.capacity, "MmapBitArrayStore capacity exceeded");
-        let offset = self.len * N;
+        let offset = self.aligned_offset(self.len);
         self.mmap[offset..offset + N].copy_from_slice(feature.bytes());
         self.len += 1;
     }
