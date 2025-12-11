@@ -9,20 +9,6 @@ use std::path::Path;
 use std::time::Instant;
 use structopt::StructOpt;
 
-struct Euclidean;
-
-impl Metric<[f32; 128]> for Euclidean {
-    type Unit = u32;
-    fn distance(&self, a: &[f32; 128], b: &[f32; 128]) -> u32 {
-        let sum: f32 = a
-            .iter()
-            .zip(b.iter())
-            .map(|(&a, &b)| (a - b).powi(2))
-            .sum();
-        (sum.sqrt() * 1_000_000.0) as u32
-    }
-}
-
 const FEATURE_SIZE: usize = 128;
 const FEATURE_BYTES: usize = FEATURE_SIZE * std::mem::size_of::<f32>();
 

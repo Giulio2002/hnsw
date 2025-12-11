@@ -97,15 +97,33 @@ impl FeatureStore<[f32; 64]> for MmapFeatureStore {
 #[structopt(name = "recall", about = "Generates recall graphs for HNSW")]
 struct Opt {
     /// The value of M to use.
+    ///
+    /// This can only be between 4 and 52 inclusive and a multiple of 4.
+    /// M0 is set to 2 * M.
     #[structopt(short = "m", long = "max_edges", default_value = "24")]
     m: usize,
     /// The dataset size to test on.
     #[structopt(short = "s", long = "size", default_value = "10000")]
     size: usize,
     /// Total number of query bitstrings.
+    ///
+    /// The higher this is, the better the quality of the output data and statistics, but
+    /// the longer the benchmark will take to set up.
     #[structopt(short = "q", long = "queries", default_value = "10000")]
     num_queries: usize,
     /// The number of dimensions in the feature vector.
+    ///
+    /// This is the length of the feature vector. The descriptor_stride (-d)
+    /// parameter must exceed this value.
+    ///
+    /// Possible values:
+    /// - 8
+    /// - 16
+    /// - 32
+    /// - 64
+    /// - 128
+    /// - 256
+    /// - 512
     #[structopt(short = "l", long = "dimensions", default_value = "64")]
     dimensions: usize,
     /// The beginning ef value.
@@ -121,14 +139,18 @@ struct Opt {
     #[structopt(short = "f", long = "file")]
     file: Option<PathBuf>,
     /// The descriptor stride length in floats.
+    ///
+    /// KAZE: 64
+    /// SIFT: 128
     #[structopt(short = "d", long = "descriptor_stride", default_value = "64")]
     descriptor_stride: usize,
     /// efConstruction controlls the quality of the graph at build-time.
     #[structopt(short = "c", long = "ef_construction", default_value = "400")]
     ef_construction: usize,
     /// Use mmap-based feature storage instead of in-memory Vec<T>.
-    #[structopt(long = "mmap")]
-    mmap: bool,
+    /// Note: Only supports 64 dimensions and does not support file input.
+    #[structopt(long = "disk")]
+    disk: bool,
 }
 
 fn process<const M: usize, const M0: usize>(opt: &Opt) -> (Vec<f64>, Vec<f64>) {
@@ -141,37 +163,54 @@ fn process<const M: usize, const M0: usize>(opt: &Opt) -> (Vec<f64>, Vec<f64>) {
     let (search_space, query_strings): (Vec<f32>, Vec<f32>) = if let Some(filepath) = &opt.file {
         eprintln!(
             "Reading {} search space descriptors of size {} f32s from file \"{}\"...",
-            opt.size, opt.descriptor_stride, filepath.display()
+            opt.size,
+            opt.descriptor_stride,
+            filepath.display()
         );
         let mut file = std::fs::File::open(filepath).expect("unable to open file");
+        // We are loading floats, so multiply by 4.
         let mut search_space = vec![0u8; opt.size * opt.descriptor_stride * 4];
         file.read_exact(&mut search_space).expect(
             "unable to read enough search descriptors from the file (try decreasing -s/-q)",
         );
-        let search_space = search_space.chunks_exact(4).map(LittleEndian::read_f32).collect();
+        let search_space = search_space
+            .chunks_exact(4)
+            .map(LittleEndian::read_f32)
+            .collect();
         eprintln!("Done.");
 
         eprintln!(
             "Reading {} query descriptors of size {} f32s from file \"{}\"...",
-            opt.num_queries, opt.descriptor_stride, filepath.display()
+            opt.num_queries,
+            opt.descriptor_stride,
+            filepath.display()
         );
+        // We are loading floats, so multiply by 4.
         let mut query_strings = vec![0u8; opt.num_queries * opt.descriptor_stride * 4];
         file.read_exact(&mut query_strings)
             .expect("unable to read enough query descriptors from the file (try decreasing -q/-s)");
-        let query_strings = query_strings.chunks_exact(4).map(LittleEndian::read_f32).collect();
+        let query_strings = query_strings
+            .chunks_exact(4)
+            .map(LittleEndian::read_f32)
+            .collect();
         eprintln!("Done.");
 
         (search_space, query_strings)
     } else {
-        eprintln!("Generating {} random vectors...", opt.size);
+        eprintln!("Generating {} random bitstrings...", opt.size);
         let search_space: Vec<f32> = rng
             .sample_iter(&Standard)
             .take(opt.size * opt.descriptor_stride)
             .collect();
         eprintln!("Done.");
 
+        // Create another RNG to prevent potential correlation.
         let rng = Pcg64::from_seed([6; 32]);
-        eprintln!("Generating {} independent random query vectors...", opt.num_queries);
+
+        eprintln!(
+            "Generating {} independent random query strings...",
+            opt.num_queries
+        );
         let query_strings: Vec<f32> = rng
             .sample_iter(&Standard)
             .take(opt.num_queries * opt.descriptor_stride)
@@ -189,7 +228,10 @@ fn process<const M: usize, const M0: usize>(opt: &Opt) -> (Vec<f64>, Vec<f64>) {
         .map(|c| &c[..opt.dimensions])
         .collect();
 
-    eprintln!("Computing the correct nearest neighbor distance for all {} queries...", opt.num_queries);
+    eprintln!(
+        "Computing the correct nearest neighbor distance for all {} queries...",
+        opt.num_queries
+    );
     let correct_worst_distances: Vec<_> = query_strings
         .iter()
         .cloned()
@@ -202,6 +244,7 @@ fn process<const M: usize, const M0: usize>(opt: &Opt) -> (Vec<f64>, Vec<f64>) {
                     v.resize_with(opt.k, || unreachable!());
                 }
             }
+            // Get the worst distance
             v.into_iter().take(opt.k).last().unwrap()
         })
         .collect();
@@ -224,13 +267,21 @@ fn process<const M: usize, const M0: usize>(opt: &Opt) -> (Vec<f64>, Vec<f64>) {
     let (recalls, times): (Vec<f64>, Vec<f64>) = efs
         .map(|ef| {
             let correct = RefCell::new(0usize);
-            let dest = vec![Neighbor { index: !0, distance: !0 }; opt.k];
+            let dest = vec![
+                Neighbor {
+                    index: !0,
+                    distance: !0,
+                };
+                opt.k
+            ];
             let stats = easybench::bench_env(dest, |mut dest| {
                 let mut refmut = state.borrow_mut();
                 let (searcher, query) = &mut *refmut;
                 let (ix, query_feature) = query.next().unwrap();
                 let correct_worst_distance = correct_worst_distances[ix];
+                // Go through all the features.
                 for &mut neighbor in hnsw.nearest(&query_feature, ef, searcher, &mut dest) {
+                    // Any feature that is less than or equal to the worst real nearest neighbor distance is correct.
                     if Euclidean.distance(&search_space[neighbor.index], &query_feature)
                         <= correct_worst_distance
                     {
@@ -240,11 +291,15 @@ fn process<const M: usize, const M0: usize>(opt: &Opt) -> (Vec<f64>, Vec<f64>) {
             });
             (stats, correct.into_inner())
         })
-        .fold((vec![], vec![]), |(mut recalls, mut times), (stats, correct)| {
-            times.push((stats.ns_per_iter * 0.1f64.powi(9)).recip());
-            recalls.push(correct as f64 / (stats.iterations * opt.k) as f64);
-            (recalls, times)
-        });
+        .fold(
+            (vec![], vec![]),
+            |(mut recalls, mut times), (stats, correct)| {
+                times.push((stats.ns_per_iter * 0.1f64.powi(9)).recip());
+                // The maximum number of correct nearest neighbors is
+                recalls.push(correct as f64 / (stats.iterations * opt.k) as f64);
+                (recalls, times)
+            },
+        );
     eprintln!("Done.");
 
     (recalls, times)
@@ -254,15 +309,21 @@ fn process_mmap<S: FeatureStore<[f32; 64]>, const M: usize, const M0: usize>(
     opt: &Opt,
     storage: S,
 ) -> (Vec<f64>, Vec<f64>) {
-    assert!(opt.k <= opt.size, "You must choose a dataset size larger or equal to the test search size");
-    assert!(opt.dimensions == 64, "Mmap mode only supports 64 dimensions (use -l 64)");
+    assert!(
+        opt.k <= opt.size,
+        "You must choose a dataset size larger or equal to the test search size"
+    );
+    assert!(opt.dimensions == 64, "Mmap mode only supports 64 dimensions");
     assert!(opt.file.is_none(), "Mmap mode does not support file input");
 
     let rng = Pcg64::from_seed([5; 32]);
 
     eprintln!("Generating {} random vectors...", opt.size);
-    let raw: Vec<f32> = rng.clone().sample_iter(&Standard).take(opt.size * 64).collect();
-    let search_space: Vec<[f32; 64]> = raw
+    let search_space: Vec<[f32; 64]> = rng
+        .clone()
+        .sample_iter(&Standard)
+        .take(opt.size * 64)
+        .collect::<Vec<f32>>()
         .chunks_exact(64)
         .map(|chunk| {
             let mut arr = [0.0f32; 64];
@@ -272,10 +333,17 @@ fn process_mmap<S: FeatureStore<[f32; 64]>, const M: usize, const M0: usize>(
         .collect();
     eprintln!("Done.");
 
+    // Create another RNG to prevent potential correlation.
     let rng = Pcg64::from_seed([6; 32]);
-    eprintln!("Generating {} independent random query vectors...", opt.num_queries);
-    let raw: Vec<f32> = rng.sample_iter(&Standard).take(opt.num_queries * 64).collect();
-    let query_strings: Vec<[f32; 64]> = raw
+
+    eprintln!(
+        "Generating {} independent random query strings...",
+        opt.num_queries
+    );
+    let query_strings: Vec<[f32; 64]> = rng
+        .sample_iter(&Standard)
+        .take(opt.num_queries * 64)
+        .collect::<Vec<f32>>()
         .chunks_exact(64)
         .map(|chunk| {
             let mut arr = [0.0f32; 64];
@@ -285,7 +353,10 @@ fn process_mmap<S: FeatureStore<[f32; 64]>, const M: usize, const M0: usize>(
         .collect();
     eprintln!("Done.");
 
-    eprintln!("Computing the correct nearest neighbor distance for all {} queries...", opt.num_queries);
+    eprintln!(
+        "Computing the correct nearest neighbor distance for all {} queries...",
+        opt.num_queries
+    );
     let correct_worst_distances: Vec<_> = query_strings
         .iter()
         .map(|feature| {
@@ -297,15 +368,20 @@ fn process_mmap<S: FeatureStore<[f32; 64]>, const M: usize, const M0: usize>(
                     v.resize_with(opt.k, || unreachable!());
                 }
             }
+            // Get the worst distance
             v.into_iter().take(opt.k).last().unwrap()
         })
         .collect();
     eprintln!("Done.");
 
-    eprintln!("Generating HNSW with MmapFeatureStore...");
+    eprintln!("Generating HNSW...");
     let prng = Pcg64::new(0xcafef00dd15ea5e5, 0xa02bdbf7bb3c0a7ac28fa16a64abf96);
-    let mut hnsw: Hnsw<Euclidean, [f32; 64], Pcg64, M, M0, S> =
-        Hnsw::new_with_storage_and_params(Euclidean, storage, Params::new().ef_construction(opt.ef_construction), prng);
+    let mut hnsw: Hnsw<Euclidean, [f32; 64], Pcg64, M, M0, S> = Hnsw::new_with_storage_and_params(
+        Euclidean,
+        storage,
+        Params::new().ef_construction(opt.ef_construction),
+        prng,
+    );
     let mut searcher: Searcher<_> = Searcher::default();
     for feature in &search_space {
         hnsw.insert(*feature, &mut searcher);
@@ -318,13 +394,21 @@ fn process_mmap<S: FeatureStore<[f32; 64]>, const M: usize, const M0: usize>(
     let (recalls, times): (Vec<f64>, Vec<f64>) = efs
         .map(|ef| {
             let correct = RefCell::new(0usize);
-            let dest = vec![Neighbor { index: !0, distance: !0 }; opt.k];
+            let dest = vec![
+                Neighbor {
+                    index: !0,
+                    distance: !0,
+                };
+                opt.k
+            ];
             let stats = easybench::bench_env(dest, |mut dest| {
                 let mut refmut = state.borrow_mut();
                 let (searcher, query) = &mut *refmut;
                 let (ix, query_feature) = query.next().unwrap();
                 let correct_worst_distance = correct_worst_distances[ix];
+                // Go through all the features.
                 for &mut neighbor in hnsw.nearest(&query_feature, ef, searcher, &mut dest) {
+                    // Any feature that is less than or equal to the worst real nearest neighbor distance is correct.
                     if Euclidean.distance(&search_space[neighbor.index], &query_feature)
                         <= correct_worst_distance
                     {
@@ -334,46 +418,38 @@ fn process_mmap<S: FeatureStore<[f32; 64]>, const M: usize, const M0: usize>(
             });
             (stats, correct.into_inner())
         })
-        .fold((vec![], vec![]), |(mut recalls, mut times), (stats, correct)| {
-            times.push((stats.ns_per_iter * 0.1f64.powi(9)).recip());
-            recalls.push(correct as f64 / (stats.iterations * opt.k) as f64);
-            (recalls, times)
-        });
+        .fold(
+            (vec![], vec![]),
+            |(mut recalls, mut times), (stats, correct)| {
+                times.push((stats.ns_per_iter * 0.1f64.powi(9)).recip());
+                // The maximum number of correct nearest neighbors is
+                recalls.push(correct as f64 / (stats.iterations * opt.k) as f64);
+                (recalls, times)
+            },
+        );
     eprintln!("Done.");
 
     (recalls, times)
 }
 
-macro_rules! process_m {
-    ($opt:expr, $m:expr, $m0:expr) => {
-        process::<$m, $m0>(&$opt)
-    };
-}
-
-macro_rules! process_mmap_m {
-    ($opt:expr, $m:expr, $m0:expr) => {
-        process_mmap::<_, $m, $m0>(&$opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", $opt.size).unwrap())
-    };
-}
-
 fn main() {
     let opt = Opt::from_args();
 
-    let (recalls, times, storage_type) = if opt.mmap {
+    let (recalls, times, storage_type) = if opt.disk {
         let (r, t) = match opt.m {
-            4 => process_mmap_m!(opt, 4, 8),
-            8 => process_mmap_m!(opt, 8, 16),
-            12 => process_mmap_m!(opt, 12, 24),
-            16 => process_mmap_m!(opt, 16, 32),
-            20 => process_mmap_m!(opt, 20, 40),
-            24 => process_mmap_m!(opt, 24, 48),
-            28 => process_mmap_m!(opt, 28, 56),
-            32 => process_mmap_m!(opt, 32, 64),
-            36 => process_mmap_m!(opt, 36, 72),
-            40 => process_mmap_m!(opt, 40, 80),
-            44 => process_mmap_m!(opt, 44, 88),
-            48 => process_mmap_m!(opt, 48, 96),
-            52 => process_mmap_m!(opt, 52, 104),
+            4 => process_mmap::<_, 4, 8>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            8 => process_mmap::<_, 8, 16>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            12 => process_mmap::<_, 12, 24>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            16 => process_mmap::<_, 16, 32>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            20 => process_mmap::<_, 20, 40>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            24 => process_mmap::<_, 24, 48>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            28 => process_mmap::<_, 28, 56>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            32 => process_mmap::<_, 32, 64>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            36 => process_mmap::<_, 36, 72>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            40 => process_mmap::<_, 40, 80>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            44 => process_mmap::<_, 44, 88>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            48 => process_mmap::<_, 48, 96>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
+            52 => process_mmap::<_, 52, 104>(&opt, MmapFeatureStore::new("/tmp/recall_mmap.bin", opt.size).unwrap()),
             _ => {
                 eprintln!("Only M between 4 and 52 inclusive and multiples of 4 are allowed");
                 return;
@@ -382,19 +458,19 @@ fn main() {
         (r, t, "MmapFeatureStore")
     } else {
         let (r, t) = match opt.m {
-            4 => process_m!(opt, 4, 8),
-            8 => process_m!(opt, 8, 16),
-            12 => process_m!(opt, 12, 24),
-            16 => process_m!(opt, 16, 32),
-            20 => process_m!(opt, 20, 40),
-            24 => process_m!(opt, 24, 48),
-            28 => process_m!(opt, 28, 56),
-            32 => process_m!(opt, 32, 64),
-            36 => process_m!(opt, 36, 72),
-            40 => process_m!(opt, 40, 80),
-            44 => process_m!(opt, 44, 88),
-            48 => process_m!(opt, 48, 96),
-            52 => process_m!(opt, 52, 104),
+            4 => process::<4, 8>(&opt),
+            8 => process::<8, 16>(&opt),
+            12 => process::<12, 24>(&opt),
+            16 => process::<16, 32>(&opt),
+            20 => process::<20, 40>(&opt),
+            24 => process::<24, 48>(&opt),
+            28 => process::<28, 56>(&opt),
+            32 => process::<32, 64>(&opt),
+            36 => process::<36, 72>(&opt),
+            40 => process::<40, 80>(&opt),
+            44 => process::<44, 88>(&opt),
+            48 => process::<48, 96>(&opt),
+            52 => process::<52, 104>(&opt),
             _ => {
                 eprintln!("Only M between 4 and 52 inclusive and multiples of 4 are allowed");
                 return;
@@ -404,6 +480,7 @@ fn main() {
     };
 
     let mut fg = Figure::new();
+
     fg.axes2d()
         .set_title(
             &format!(
@@ -422,5 +499,5 @@ fn main() {
         .set_y_grid(true)
         .set_y_minor_grid(true);
 
-    fg.show().ok();
+    fg.show().expect("unable to show gnuplot");
 }
